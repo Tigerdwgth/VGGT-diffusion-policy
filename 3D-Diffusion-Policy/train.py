@@ -40,6 +40,9 @@ class TrainDP3Workspace:
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
         self.cfg = cfg
+
+       
+
         self._output_dir = output_dir
         self._saving_thread = None
         
@@ -98,7 +101,23 @@ class TrainDP3Workspace:
 
         # configure dataset
         dataset: BaseDataset
+        print(f"zarr_path: {cfg.task.dataset.zarr_path}")
+        print("robovis: ", cfg.get('robovis', True))
+        if not cfg.get('robovis', True):
+            print("Robovis is false, modifying zarr_path")
+            cfg.task.dataset.zarr_path = cfg.task.dataset.zarr_path.replace('_expert.zarr', '_expert_invis.zarr')
+        invisxml='/home/jdh/Projects/Robotics/3D-Diffusion-Policy/third_party/Metaworld/metaworld/envs/assets_v2/objects/assets/xyz_base_invis.xml'
+        visxml='/home/jdh/Projects/Robotics/3D-Diffusion-Policy/third_party/Metaworld/metaworld/envs/assets_v2/objects/assets/xyz_base_vis.xml'    
+        targetxml='/home/jdh/Projects/Robotics/3D-Diffusion-Policy/third_party/Metaworld/metaworld/envs/assets_v2/objects/assets/xyz_base.xml'
+        if not cfg.get('eval_robovis'):
+            cprint("robot is invisiable during evaluation", "red")
+            os.system(f'cp {invisxml} {targetxml}')
+        else:
+            cprint("robot is visiable during evaluation", "red")
+            os.system(f'cp {visxml} {targetxml}')
+            
         dataset = hydra.utils.instantiate(cfg.task.dataset)
+         # Check if robovis is false and modify zarr_path
 
         assert isinstance(dataset, BaseDataset), print(f"dataset must be BaseDataset, got {type(dataset)}")
         train_dataloader = DataLoader(dataset, **cfg.dataloader)

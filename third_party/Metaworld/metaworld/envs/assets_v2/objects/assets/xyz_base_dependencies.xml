@@ -3,6 +3,7 @@
     <asset>
 
       <material name="xyz_col" rgba="0.3 0.3 1.0 0.5" shininess="0" specular="0.5"/>
+      <!-- <material name="xyz_col" rgba="0.5 0.5 1.0 0.0" shininess="0" specular="0"/> -->
 
       <mesh file="../objects/meshes/xyz_base/base.stl" name="base"/>
       <mesh file="../objects/meshes/xyz_base/eGripperBase.stl" name="eGripperBase"/>

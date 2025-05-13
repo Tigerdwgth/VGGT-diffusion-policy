@@ -1,6 +1,7 @@
 from typing import Dict
 import math
 import torch
+import torchvision
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, reduce
@@ -11,6 +12,7 @@ import time
 import numpy as np
 import pytorch3d.ops as torch3d_ops
 
+
 from diffusion_policy_3d.model.common.normalizer import LinearNormalizer
 from diffusion_policy_3d.policy.base_policy import BasePolicy
 from diffusion_policy_3d.model.diffusion.conditional_unet1d import ConditionalUnet1D
@@ -18,8 +20,9 @@ from diffusion_policy_3d.model.diffusion.mask_generator import LowdimMaskGenerat
 from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.common.model_util import print_params
 from diffusion_policy_3d.model.vision.pointnet_extractor import DP3Encoder
+from diffusion_policy_3d.model.vision.pointnet_extractor import create_mlp
 
-class DP3(BasePolicy):
+class DP(BasePolicy):
     def __init__(self, 
             shape_meta: dict,
             noise_scheduler: DDPMScheduler,
@@ -43,6 +46,8 @@ class DP3(BasePolicy):
             pointcloud_encoder_cfg=None,
             # parameters passed to step,
             pc_noise=False,
+            prio_as_cond=True,
+            visual_prio_training=True,
             **kwargs):
         super().__init__()
 
@@ -62,16 +67,27 @@ class DP3(BasePolicy):
         obs_dict = dict_apply(obs_shape_meta, lambda x: x['shape'])
 
 
-        obs_encoder = DP3Encoder(observation_space=obs_dict,
-                                                   img_crop_shape=crop_shape,
-                                                out_channel=encoder_output_dim,
-                                                pointcloud_encoder_cfg=pointcloud_encoder_cfg,
-                                                use_pc_color=use_pc_color,
-                                                pointnet_type=pointnet_type,
-                                                )
+        # obs_encoder = DP3Encoder(observation_space=obs_dict,
+        #                                            img_crop_shape=crop_shape,
+        #                                         out_channel=encoder_output_dim,
+        #                                         pointcloud_encoder_cfg=pointcloud_encoder_cfg,
+        #                                         use_pc_color=use_pc_color,
+        #                                         pointnet_type=pointnet_type,
+        #                                         )
+        #ues pretrained resnet18
+        obs_encoder= DPEncoder(observation_space=obs_dict,
+                                            img_crop_shape=crop_shape,
+                                         out_channel=encoder_output_dim,
+                                         pointcloud_encoder_cfg=pointcloud_encoder_cfg,
+                                         use_pc_color=use_pc_color,
+                                         pointnet_type=pointnet_type,
+                                         prio_as_cond=prio_as_cond,
+                                         out_dim=encoder_output_dim
+                                         )
+            
 
         # create diffusion model
-        obs_feature_dim = obs_encoder.output_shape()
+        obs_feature_dim = encoder_output_dim
         input_dim = action_dim + obs_feature_dim
         global_cond_dim = None
         if obs_as_global_cond:
@@ -80,7 +96,9 @@ class DP3(BasePolicy):
                 global_cond_dim = obs_feature_dim
             else:
                 global_cond_dim = obs_feature_dim * n_obs_steps
-                
+        print("n_obs_steps",n_obs_steps)
+        print("condition_type",condition_type)
+        print("global_cond_dim",global_cond_dim)        
 
         self.use_pc_color = use_pc_color
         self.pointnet_type = pointnet_type
@@ -124,6 +142,8 @@ class DP3(BasePolicy):
         self.n_action_steps = n_action_steps
         self.n_obs_steps = n_obs_steps
         self.obs_as_global_cond = obs_as_global_cond
+        self.prio_as_cond = prio_as_cond
+        self.visual_prio_training = visual_prio_training
         
         #
         self.pc_noise=pc_noise
@@ -136,8 +156,8 @@ class DP3(BasePolicy):
         
         
         #本体感知模块，一个三层的mlp用于直接预测机器人的状态
-        self.use_proprioception = False
-        if self.use_proprioception: #本体感知模块
+        
+        if self.visual_prio_training:
             self.proprioception_mlp = nn.Sequential(
             nn.Linear(obs_feature_dim, 512),
             nn.ReLU(), 
@@ -197,48 +217,15 @@ class DP3(BasePolicy):
         """
         # normalize input
         nobs = self.normalizer.normalize(obs_dict)
+        # print(nobs.keys())
         # this_n_point_cloud = nobs['imagin_robot'][..., :3] # only use coordinate
-        if not self.use_pc_color:
-            nobs['point_cloud'] = nobs['point_cloud'][..., :3]
-        this_n_point_cloud = nobs['point_cloud']
-
-        self.pc_noise=False
-        noise_ratio=0.8
+        # if not self.use_pc_color:
+        #     nobs['point_cloud'] = nobs['point_cloud'][..., :3]
+        # this_n_point_cloud = nobs['point_cloud']
         
-       
-        def add_noise_to_point_cloud_torch(point_cloud, noise_ratio=0.1):
-            """
-            使用 PyTorch 给点云添加噪声：随机选择一定比例的点并重新定位到点云范围内
-            :param point_cloud: (B, C, N, 3) 点云数据 (torch.Tensor)
-            :param noise_ratio: 需要重新随机定位的点的比例
-            :return: 添加噪声后的点云 (torch.Tensor)
-            """
-            # 获取点云的形状
-            batch_size, num_channels, num_points, _ = point_cloud.shape
-            num_noisy = int(num_points * noise_ratio)
-            if num_noisy == 0:
-                return point_cloud  # 噪声比例太小，不改变数据
-        
-            # 选择需要随机化的点索引
-            noisy_indices = torch.randperm(num_points)[:num_noisy]
-        
-            # 计算点云边界
-            min_bounds, _ = torch.min(point_cloud, dim=2, keepdim=True)  # (B, C, 1, 3)
-            max_bounds, _ = torch.max(point_cloud, dim=2, keepdim=True)  # (B, C, 1, 3)
-        
-            # 生成新的随机坐标
-            new_points = torch.rand((batch_size, num_channels, num_noisy, 3), device=point_cloud.device) * (max_bounds - min_bounds) + min_bounds
-        
-            # 替换原点云中的对应点
-            point_cloud[:, :, noisy_indices, :] = new_points
-            return point_cloud
-        
-        # 应用加噪函数
-        if self.pc_noise:
-            nobs['point_cloud'] = add_noise_to_point_cloud_torch(this_n_point_cloud, noise_ratio)
-            
         
         value = next(iter(nobs.values()))
+        
         B, To = value.shape[:2]
         T = self.horizon
         Da = self.action_dim
@@ -248,13 +235,19 @@ class DP3(BasePolicy):
         # build input
         device = self.device
         dtype = self.dtype
+        
 
         # handle different ways of passing observation
         local_cond = None
         global_cond = None
+        this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
+        this_state=this_nobs['agent_pos']
         if self.obs_as_global_cond:
             # condition through global feature
-            this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
+
+            
+            if this_nobs['image'].shape[1] != 3:
+                this_nobs['image'] = this_nobs['image'].permute(0, 3, 1, 2)
             nobs_features = self.obs_encoder(this_nobs)
             if "cross_attention" in self.condition_type:
                 # treat as a sequence
@@ -265,16 +258,21 @@ class DP3(BasePolicy):
             # empty data for action
             cond_data = torch.zeros(size=(B, T, Da), device=device, dtype=dtype)
             cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+            
         else:
-            # condition through impainting
+            # condition through impainting 
             this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
+            if this_nobs['image'].shape[1] != 3:
+                this_nobs['image'] = this_nobs['image'].permute(0, 3, 1, 2)
             nobs_features = self.obs_encoder(this_nobs)
             # reshape back to B, T, Do
             nobs_features = nobs_features.reshape(B, To, -1)
+            
             cond_data = torch.zeros(size=(B, T, Da+Do), device=device, dtype=dtype)
             cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
             cond_data[:,:To,Da:] = nobs_features
             cond_mask[:,:To,Da:] = True
+
 
         # run sampling
         nsample = self.conditional_sample(
@@ -313,68 +311,13 @@ class DP3(BasePolicy):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
 
-    def apply_mixup(nobs, nactions, horizon, batch_size, alpha=0.2, mixup_prob=0.0, device="cuda"):
-        """
-        应用 Mixup 数据增强，随机生成 mask 并对轨迹进行组合。
-        Args:
-            nobs (dict): 包含点云和位置信息的观测数据。
-            nactions (torch.Tensor): 动作数据，形状为 (B, T, ...)，其中 B 是批量大小，T 是时间步长。
-            horizon (int): 时间步长。
-            batch_size (int): 批量大小。
-            alpha (float): Beta 分布的参数，用于生成 lambda。
-            mixup_prob (float): 应用 Mixup 的概率。
-            device (str): 设备类型（如 "cpu" 或 "cuda"）。
-
-        Returns:
-            nobs (dict): 更新后的观测数据。
-            nactions (torch.Tensor): 更新后的动作数据。
-            trajectory (torch.Tensor): 更新后的轨迹数据。
-            cond_data (torch.Tensor): 条件数据（与轨迹相同）。
-        """
-        if np.random.rand() >= mixup_prob:
-            # 如果不应用 Mixup，直接返回原始数据
-            trajectory = nactions
-            cond_data = trajectory
-            return nobs, nactions, trajectory, cond_data
-        # 生成 lambda 和 mix_length
-        lam = np.random.beta(alpha, alpha)
-        mix_length = int(horizon * lam)
-        lam = mix_length / horizon  # 重新计算 lambda
-        # 如果 mix_length 为 0 或者 horizon 不足以支持 mix_length，直接返回原始数据
-        if mix_length == 0 or horizon <= mix_length:
-            trajectory = nactions
-            cond_data = trajectory
-            return nobs, nactions, trajectory, cond_data
-        # 随机生成每个样本的起始点
-        start_points = torch.randint(0, horizon - mix_length + 1, (batch_size,), device=device)
-        # 构造 mask
-        mask = torch.zeros((batch_size, horizon), dtype=torch.bool, device=device)
-        for i, start in enumerate(start_points):
-            mask[i, start:start + mix_length] = 1
-
-        # 生成反向 mask
-        inverse_mask = ~mask
-        # 随机打乱索引
-        index = torch.randperm(batch_size, device=device)
-        # 根据 mask 和 inverse_mask[index] 进行随机组合
-        nobs["point_cloud"] = (
-            mask.unsqueeze(-1) * nobs["point_cloud"] + inverse_mask.unsqueeze(-1) * nobs["point_cloud"][index]
-        )
-        nobs["agent_pos"] = (
-            mask.unsqueeze(-1) * nobs["agent_pos"] + inverse_mask.unsqueeze(-1) * nobs["agent_pos"][index]
-        )
-        nactions = mask * nactions + inverse_mask * nactions[index]
-        # 更新 trajectory 和 cond_data
-        trajectory = nactions
-        cond_data = trajectory
-
-        return nobs, nactions, trajectory, cond_data
     def compute_loss(self, batch):
-        # normalize input
 
         nobs = self.normalizer.normalize(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
-
+        # normalize input
+        # print("shape of batch pc",batch['obs']['point_cloud'].shape)
+        # print("shape of batch image",batch['obs']['image'].shape)
         if not self.use_pc_color:
             nobs['point_cloud'] = nobs['point_cloud'][..., :3]
         
@@ -387,19 +330,14 @@ class DP3(BasePolicy):
         trajectory = nactions
         cond_data = trajectory
         
-        ###RoboMixup###
-        # print(nobs.keys())
-        # print("shape of agent_pos",nobs["agent_pos"].shape)# B,T,3
-        # print("shape of nobs",nobs["point_cloud"].shape)# B,T,512,3
-        # print("shape of nactions",nactions.shape)# B,T,24
-        # print("shape of trajectory",trajectory.shape)# B,T,24
-        # print("shape of cond_data",cond_data.shape) # B,T,24
-        # nobs, nactions, trajectory, cond_data = self.apply_mixup(nobs, nactions, horizon, batch_size)
-        
         if self.obs_as_global_cond:
             # reshape B, T, ... to B*T
             this_nobs = dict_apply(nobs, 
                 lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
+            # print("shape of this_nobs",this_nobs.shape)
+            # print(this_nobs.keys())
+            if this_nobs['image'].shape[1] != 3:
+                this_nobs['image'] = this_nobs['image'].permute(0, 3, 1, 2)
             nobs_features = self.obs_encoder(this_nobs)
             if "cross_attention" in self.condition_type:
                 # treat as a sequence
@@ -408,18 +346,24 @@ class DP3(BasePolicy):
                 # reshape back to B, Do
                 global_cond = nobs_features.reshape(batch_size, -1)
             # this_n_point_cloud = this_nobs['imagin_robot'].reshape(batch_size,-1, *this_nobs['imagin_robot'].shape[1:])
-            this_n_point_cloud = this_nobs['point_cloud'].reshape(batch_size,-1, *this_nobs['point_cloud'].shape[1:])
-            this_n_point_cloud = this_n_point_cloud[..., :3]
+            # this_n_point_cloud = this_nobs['point_cloud'].reshape(batch_size,-1, *this_nobs['point_cloud'].shape[1:])
+            # this_n_point_cloud = this_n_point_cloud[..., :3]
         else:
             # reshape B, T, ... to B*T
-            this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
+            this_nobs = dict_apply(nobs, 
+                lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
+            # # print("shape of this_nobs",this_nobs)
+            # print(this_nobs.keys())
+            if this_nobs['image'].shape[1] != 3:
+                this_nobs['image'] = this_nobs['image'].permute(0, 3, 1, 2)
             nobs_features = self.obs_encoder(this_nobs)
 
             # reshape back to B, T, Do
             nobs_features = nobs_features.reshape(batch_size, horizon, -1)
-            cond_data = torch.cat([nactions, nobs_features], dim=-1)
+            if self.prio_as_cond:
+                # print("shape of nobs_features",nobs_features.shape)
+                cond_data = torch.cat([nactions, nobs_features], dim=-1)
             trajectory = cond_data.detach()
-
 
         # generate impainting mask
         condition_mask = self.mask_generator(trajectory.shape)
@@ -448,7 +392,13 @@ class DP3(BasePolicy):
         # apply conditioning
         noisy_trajectory[condition_mask] = cond_data[condition_mask]
 
-       
+        # print("shape of noisy_trajectory",noisy_trajectory.shape)
+        # print("shape of timesteps",timesteps.shape)
+        # # print("shape of local_cond",local_cond.shape)
+        print("this_nobs_features",this_nobs['agent_pos'].shape)
+        print("shape of global_cond",global_cond.shape)
+        print("self.prio as cond",self.prio_as_cond)
+
         pred = self.model(sample=noisy_trajectory, 
                         timestep=timesteps, 
                             local_cond=local_cond, 
@@ -489,7 +439,7 @@ class DP3(BasePolicy):
         # print("shape of nobs_features",nobs_features.shape)
         # print("shape of this_nobs",this_nobs['agent_pos'].shape)
         # print("shape of actions",nactions.shape)
-        if self.use_proprioception:
+        if self.visual_prio_training:
             proprioception= self.proprioception_mlp(nobs_features)
             loss_proprioception = F.mse_loss(proprioception, this_nobs['agent_pos'], reduction='none')
             loss+= loss_proprioception.mean()
@@ -506,4 +456,94 @@ class DP3(BasePolicy):
         # print(f"t6-t5: {t6-t5:.3f}")
         
         return loss, loss_dict
+    
+class DPEncoder(nn.Module):
+    def __init__(self, 
+                 observation_space: Dict, 
+                 img_crop_shape=None,
+                 out_channel=256,
+                 state_mlp_size=(64, 64), state_mlp_activation_fn=nn.ReLU,
+                 pointcloud_encoder_cfg=None,
+                 use_pc_color=False,
+                 pointnet_type='pointnet',
+                 prio_as_cond=True,
+                 ):
+        super().__init__()
+        self.imagination_key = 'imagin_robot'
+        self.state_key = 'agent_pos'
+        self.point_cloud_key = 'point_cloud'
+        self.rgb_image_key = 'image'
+        self.n_output_channels = out_channel
+        self.prio_as_cond = prio_as_cond
+        
+        
+        self.use_imagined_robot = self.imagination_key in observation_space.keys()
+        self.point_cloud_shape = observation_space[self.point_cloud_key]
+        self.state_shape = observation_space[self.state_key]
+        if self.use_imagined_robot:
+            self.imagination_shape = observation_space[self.imagination_key]
+        else:
+            self.imagination_shape = None
+            
+        
+        
+        cprint(f"[DP3Encoder] point cloud shape: {self.point_cloud_shape}", "yellow")
+        cprint(f"[DP3Encoder] state shape: {self.state_shape}", "yellow")
+        cprint(f"[DP3Encoder] imagination point shape: {self.imagination_shape}", "yellow")
+        # print("encoder_output_dim",out_channel)
+        cprint(f"[DP3Encoder] encoder_output_dim: {out_channel}", "yellow")
 
+        self.use_pc_color = use_pc_color
+        self.pointnet_type = pointnet_type
+        self.extractor=torchvision.models.resnet18(pretrained=True)
+        self.extractor.fc = nn.Linear(self.extractor.fc.in_features, out_dim)
+        
+
+
+        if len(state_mlp_size) == 0:
+            raise RuntimeError(f"State mlp size is empty")
+        elif len(state_mlp_size) == 1:
+            net_arch = []
+        else:
+            net_arch = state_mlp_size[:-1]
+        output_dim = state_mlp_size[-1]
+        
+        
+        self.state_mlp = nn.Sequential(*create_mlp(self.state_shape[0], output_dim, net_arch, state_mlp_activation_fn))
+
+        cprint(f"[DPEncoder] output dim: {self.n_output_channels}", "red")
+
+    def _register_hook(self, module):
+        def hook(module, input, output):
+            if isinstance(output, tuple):
+                self.feature = output[0].detach()
+            else:
+                self.feature = output.detach()
+        module.register_forward_hook(hook)
+        return module
+    
+    def get_feature(self):
+        return self.feature
+    
+    def forward(self, observations: Dict) -> torch.Tensor:
+        images = observations[self.rgb_image_key]
+        # b*c*h*w
+        # assert len(images.shape) == 4, cprint(f"point cloud shape: {images.shape}, length should be 4", "red")
+        if self.use_imagined_robot:
+            img_points = observations[self.imagination_key][..., :images.shape[-1]] # align the last dim
+            images = torch.concat([images, img_points], dim=1)
+        
+        # points = torch.transpose(points, 1, 2)   # B * 3 * N
+        # points: B * 3 * (N + sum(Ni))
+        # print("DP3extractor",{points.shape})
+        pn_feat = self.extractor(images)    # B * out_channel
+        state = observations[self.state_key]
+        state_feat = self.state_mlp(state)  # B * 64
+        if self.prio_as_cond:
+            
+            final_feat = torch.cat([pn_feat, state_feat], dim=-1)
+        return final_feat
+
+
+    def output_shape(self):
+        return self.n_output_channels

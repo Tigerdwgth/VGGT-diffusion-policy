@@ -302,6 +302,8 @@ class ConditionalUnet1D(nn.Module):
         
         x = sample
         h = []
+        # print("unet input shape: ", x.shape)
+        # print("global feature shape: ", global_feature.shape)
         for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
             if self.use_down_condition:
                 x = resnet(x, global_feature)
