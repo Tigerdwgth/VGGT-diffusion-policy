@@ -284,7 +284,7 @@ class DP3Encoder(nn.Module):
         cprint(f"[DP3Encoder] point cloud shape: {self.point_cloud_shape}", "yellow")
         cprint(f"[DP3Encoder] state shape: {self.state_shape}", "yellow")
         cprint(f"[DP3Encoder] imagination point shape: {self.imagination_shape}", "yellow")
-        
+        cprint(f"[DP3Encoder] encoder_out_put_dim: {self.n_output_channels}", "yellow")
 
         self.use_pc_color = use_pc_color
         self.pointnet_type = pointnet_type

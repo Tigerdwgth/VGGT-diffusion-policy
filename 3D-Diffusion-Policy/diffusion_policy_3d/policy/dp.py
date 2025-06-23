@@ -13,6 +13,7 @@ import numpy as np
 import pytorch3d.ops as torch3d_ops
 
 
+
 from diffusion_policy_3d.model.common.normalizer import LinearNormalizer
 from diffusion_policy_3d.policy.base_policy import BasePolicy
 from diffusion_policy_3d.model.diffusion.conditional_unet1d import ConditionalUnet1D
@@ -21,7 +22,7 @@ from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.common.model_util import print_params
 from diffusion_policy_3d.model.vision.pointnet_extractor import DP3Encoder
 from diffusion_policy_3d.model.vision.pointnet_extractor import create_mlp
-
+from diffusion_policy_3d.model.vision.vggt.vggt.models.vggt_enc import VGGT_ENC
 class DP(BasePolicy):
     def __init__(self, 
             shape_meta: dict,
@@ -52,7 +53,7 @@ class DP(BasePolicy):
         super().__init__()
 
         self.condition_type = condition_type
-
+        self.prio_as_cond = prio_as_cond
         # parse shape_meta
         action_shape = shape_meta['action']['shape']
         self.action_shape = action_shape
@@ -82,11 +83,11 @@ class DP(BasePolicy):
                                          use_pc_color=use_pc_color,
                                          pointnet_type=pointnet_type,
                                          prio_as_cond=prio_as_cond,
-                                         out_dim=encoder_output_dim
                                          )
             
 
         # create diffusion model
+        cprint(f"obs_feature_dim{encoder_output_dim}", "yellow")
         obs_feature_dim = encoder_output_dim
         input_dim = action_dim + obs_feature_dim
         global_cond_dim = None
@@ -96,9 +97,13 @@ class DP(BasePolicy):
                 global_cond_dim = obs_feature_dim
             else:
                 global_cond_dim = obs_feature_dim * n_obs_steps
-        print("n_obs_steps",n_obs_steps)
-        print("condition_type",condition_type)
-        print("global_cond_dim",global_cond_dim)        
+        if self.prio_as_cond:
+            global_cond_dim += obs_feature_dim* n_obs_steps
+                # cprint(f"here")
+        cprint(f"[DiffusionUnetHybridPointcloudPolicy] obs_feature_dim: {obs_feature_dim}", "yellow")
+        cprint(f"[DiffusionUnetHybridPointcloudPolicy] input_dim: {input_dim}", "yellow")
+        cprint(f"[DiffusionUnetHybridPointcloudPolicy] global_cond_dim: {global_cond_dim}", "yellow")
+                 
 
         self.use_pc_color = use_pc_color
         self.pointnet_type = pointnet_type
@@ -142,7 +147,7 @@ class DP(BasePolicy):
         self.n_action_steps = n_action_steps
         self.n_obs_steps = n_obs_steps
         self.obs_as_global_cond = obs_as_global_cond
-        self.prio_as_cond = prio_as_cond
+        
         self.visual_prio_training = visual_prio_training
         
         #
@@ -217,13 +222,6 @@ class DP(BasePolicy):
         """
         # normalize input
         nobs = self.normalizer.normalize(obs_dict)
-        # print(nobs.keys())
-        # this_n_point_cloud = nobs['imagin_robot'][..., :3] # only use coordinate
-        # if not self.use_pc_color:
-        #     nobs['point_cloud'] = nobs['point_cloud'][..., :3]
-        # this_n_point_cloud = nobs['point_cloud']
-        
-        
         value = next(iter(nobs.values()))
         
         B, To = value.shape[:2]
@@ -243,12 +241,14 @@ class DP(BasePolicy):
         this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
         this_state=this_nobs['agent_pos']
         if self.obs_as_global_cond:
-            # condition through global feature
-
-            
             if this_nobs['image'].shape[1] != 3:
                 this_nobs['image'] = this_nobs['image'].permute(0, 3, 1, 2)
             nobs_features = self.obs_encoder(this_nobs)
+            if self.prio_as_cond:
+                nobs_features=torch.concat([nobs_features['img_feat'],nobs_features['state_feat']], dim=-1)
+            else:
+                nobs_features = nobs_features['img_feat']
+                
             if "cross_attention" in self.condition_type:
                 # treat as a sequence
                 global_cond = nobs_features.reshape(B, self.n_obs_steps, -1)
@@ -265,6 +265,10 @@ class DP(BasePolicy):
             if this_nobs['image'].shape[1] != 3:
                 this_nobs['image'] = this_nobs['image'].permute(0, 3, 1, 2)
             nobs_features = self.obs_encoder(this_nobs)
+            if self.prio_as_cond:
+                nobs_features=torch.concat([nobs_features['img_feat'],nobs_features['state_feat']], dim=-1)
+            else:
+                nobs_features = nobs_features['img_feat']
             # reshape back to B, T, Do
             nobs_features = nobs_features.reshape(B, To, -1)
             
@@ -339,6 +343,11 @@ class DP(BasePolicy):
             if this_nobs['image'].shape[1] != 3:
                 this_nobs['image'] = this_nobs['image'].permute(0, 3, 1, 2)
             nobs_features = self.obs_encoder(this_nobs)
+            img_feat = nobs_features['img_feat']
+            if self.prio_as_cond:
+                nobs_features=torch.concat([nobs_features['img_feat'],nobs_features['state_feat']], dim=-1)
+            else:
+                nobs_features = nobs_features['img_feat']
             if "cross_attention" in self.condition_type:
                 # treat as a sequence
                 global_cond = nobs_features.reshape(batch_size, self.n_obs_steps, -1)
@@ -357,6 +366,14 @@ class DP(BasePolicy):
             if this_nobs['image'].shape[1] != 3:
                 this_nobs['image'] = this_nobs['image'].permute(0, 3, 1, 2)
             nobs_features = self.obs_encoder(this_nobs)
+            img_feat = nobs_features['img_feat']
+            state_feat = nobs_features['state_feat']
+            if self.prio_as_cond:
+                nobs_features=torch.concat([img_feat,state_feat], dim=-1)
+                
+            else:
+                nobs_features = img_feat
+                
 
             # reshape back to B, T, Do
             nobs_features = nobs_features.reshape(batch_size, horizon, -1)
@@ -391,13 +408,6 @@ class DP(BasePolicy):
 
         # apply conditioning
         noisy_trajectory[condition_mask] = cond_data[condition_mask]
-
-        # print("shape of noisy_trajectory",noisy_trajectory.shape)
-        # print("shape of timesteps",timesteps.shape)
-        # # print("shape of local_cond",local_cond.shape)
-        print("this_nobs_features",this_nobs['agent_pos'].shape)
-        print("shape of global_cond",global_cond.shape)
-        print("self.prio as cond",self.prio_as_cond)
 
         pred = self.model(sample=noisy_trajectory, 
                         timestep=timesteps, 
@@ -440,7 +450,8 @@ class DP(BasePolicy):
         # print("shape of this_nobs",this_nobs['agent_pos'].shape)
         # print("shape of actions",nactions.shape)
         if self.visual_prio_training:
-            proprioception= self.proprioception_mlp(nobs_features)
+            # cprint(f"nobs_features shape: {img_feat.shape}","cyan")
+            proprioception= self.proprioception_mlp(img_feat)
             loss_proprioception = F.mse_loss(proprioception, this_nobs['agent_pos'], reduction='none')
             loss+= loss_proprioception.mean()
         
@@ -466,6 +477,7 @@ class DPEncoder(nn.Module):
                  pointcloud_encoder_cfg=None,
                  use_pc_color=False,
                  pointnet_type='pointnet',
+                 enc_type='vggt',
                  prio_as_cond=True,
                  ):
         super().__init__()
@@ -495,10 +507,44 @@ class DPEncoder(nn.Module):
 
         self.use_pc_color = use_pc_color
         self.pointnet_type = pointnet_type
-        self.extractor=torchvision.models.resnet18(pretrained=True)
-        self.extractor.fc = nn.Linear(self.extractor.fc.in_features, out_dim)
-        
-
+        self.enc_type=enc_type
+        if enc_type =='resnet18':
+            self.extractor=torchvision.models.resnet18(pretrained=True)
+            self.extractor.fc = nn.Linear(self.extractor.fc.in_features, out_channel)
+        elif enc_type == 'resnet50':
+            self.extractor=torchvision.models.resnet50(pretrained=True)
+            self.extractor.fc = nn.Linear(self.extractor.fc.in_features, out_channel)
+        elif enc_type == 'vggt':
+            # self.extractor = VGGT_ENC().from_pretrained("facebook/VGGT-1B")
+            #load weight from cache
+            cprint(f"[VGGTEncoder] using vggt encoder")
+            cache_dir='/home/jdh/nvme2/hub/models--facebook--VGGT-1B/snapshots/860abec7937da0a4c03c41d3c269c366e82abdf9/model.safetensors'
+            from safetensors.torch import load_file
+            # 加载全部权重
+            weights = load_file(cache_dir, device='cpu')  # 使用 CPU 设备加载权重
+            # 只保留 aggregator 部分
+            agg_weights = {k.replace("aggregator.", ""): v for k, v in weights.items() if k.startswith("aggregator.")}
+            # 加载到 aggregator 模型
+            self.extractor = VGGT_ENC()
+            self.extractor.load_state_dict(agg_weights, strict=False)
+            #do not train this part 
+            for param in self.extractor.parameters():
+                param.requires_grad = False
+                
+            self.projector = nn.Sequential(
+                nn.Linear(2048, out_channel),
+                nn.GELU(),
+                nn.Linear(out_channel, out_channel)
+            )
+            #only load the encoder part with safetensor
+            # weight=
+            #token fusion
+            #input size[ batch_size ,obs_steps ,frames ,3 , H *,W]
+            # reshape  [batch_size*obs_steps, frames, 3, H*,W]
+            # out_put_size=  [batch_size*obs_steps,frames,H*W/(patch_size*patch_size),2048]
+            # How to fuse the tokens to target output size?
+            # use mean
+            # targetsize [batch_size,obs_steps,frames,embed_dim]
 
         if len(state_mlp_size) == 0:
             raise RuntimeError(f"State mlp size is empty")
@@ -508,10 +554,15 @@ class DPEncoder(nn.Module):
             net_arch = state_mlp_size[:-1]
         output_dim = state_mlp_size[-1]
         
-        
+        self.n_output_channels  += output_dim
         self.state_mlp = nn.Sequential(*create_mlp(self.state_shape[0], output_dim, net_arch, state_mlp_activation_fn))
 
         cprint(f"[DPEncoder] output dim: {self.n_output_channels}", "red")
+        
+        #param size
+        cprint(f"[VGGT Encoder] param size: {sum(p.numel() for p in self.parameters())}", "yellow")
+        #trainable params
+        cprint(f"[VGGT Encoder] trainable params: {sum(p.numel() for p in self.parameters() if p.requires_grad)}", "yellow")
 
     def _register_hook(self, module):
         def hook(module, input, output):
@@ -532,18 +583,68 @@ class DPEncoder(nn.Module):
         if self.use_imagined_robot:
             img_points = observations[self.imagination_key][..., :images.shape[-1]] # align the last dim
             images = torch.concat([images, img_points], dim=1)
-        
+        if self.enc_type != 'vggt':
+            img_feat = self.extractor(images)# B * out_channel
+            
         # points = torch.transpose(points, 1, 2)   # B * 3 * N
         # points: B * 3 * (N + sum(Ni))
         # print("DP3extractor",{points.shape})
-        pn_feat = self.extractor(images)    # B * out_channel
-        state = observations[self.state_key]
-        state_feat = self.state_mlp(state)  # B * 64
-        if self.prio_as_cond:
+        else:
+            #input size
+            # if not batched 
+        
+            if len(images.shape) == 5:
+                images = rearrange(images, 'obs_stepXframes c h w -> 1 obs_stepXframes c h w')
+            bsz=images.shape[0]
+            #resize image height and width to be divisible by 14 
+            h, w = images.shape[-2], images.shape[-1]
+            new_h = math.ceil(h / 14) * 14
+            new_w = math.ceil(w / 14) * 14
+            images= F.interpolate(images, size=(new_h, new_w), mode='bilinear', align_corners=False)
+
+            # images = rearrange(images, 'b s f c h w -> (b s) f c h w')
+            img_feat = self.extractor(images) # b*obs_steps frames patchnums dims
+            img_feat = reduce(img_feat, 'bs f p d -> bs f d', 'mean') # b*obs_steps frames dims
+            img_feat = self.projector(img_feat) # (b s) f d
             
-            final_feat = torch.cat([pn_feat, state_feat], dim=-1)
-        return final_feat
+            
+        state_feat = None
+        if self.prio_as_cond:
+            state = observations[self.state_key]
+            state_feat = self.state_mlp(state)  # B * 64
+        return {'img_feat': img_feat, 'state_feat': state_feat}
+        # if self.prio_as_cond:
+            # final_feat = torch.cat([pn_feat, state_feat], dim=-1)
+        # return final_feat
+        
 
 
     def output_shape(self):
         return self.n_output_channels
+    
+def main():
+    # Example usage
+    obs_shape = {
+        'image': (2,3, 224, 224),
+        'point_cloud': (1024, 6),  # 1024 points, each with 6 features (x, y, z, r, g, b)
+        'agent_pos': (9,),  # 9 features for the agent's position
+        # 'imagin_robot': (2,1024, 6),  # 1024 points
+        
+    }
+    obs = {
+        'image': torch.randn(2,3, 224, 224),
+        'point_cloud': torch.randn(2, 1024, 6),
+        'agent_pos': torch.randn(2, 9),
+        # 'imagin_robot': torch.randn(2, 1024, 6),
+
+    }
+    # load from dp.yaml
+    # /home/jdh/Projects/Robotics/3D-Diffusion-Policy/3D-Diffusion-Policy/diffusion_policy_3d/config/dp.yaml
+   
+    encoder = DPEncoder(obs_shape,enc_type='resnet18')
+    features = encoder(obs)
+    print(features['img_feat'].shape)
+    print(features['state_feat'].shape)
+
+if __name__ == "__main__":
+    main()

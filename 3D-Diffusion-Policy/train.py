@@ -515,7 +515,7 @@ class TrainDP3Workspace:
 @hydra.main(
     version_base=None,
     config_path=str(pathlib.Path(__file__).parent.joinpath(
-        'diffusion_policy_3d', 'config'))
+        'diffusion_policy_3d', 'config')),
 )
 def main(cfg):
     workspace = TrainDP3Workspace(cfg)

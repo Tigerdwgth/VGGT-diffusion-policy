@@ -26,8 +26,13 @@ def load_mw_policy(task_name):
 def main(args):
 	env_name = args.env_name
 
-	
-	save_dir = os.path.join(args.root_dir, 'metaworld_'+args.env_name+'_expert.zarr')
+	if not args.robovis: 
+		print("Using invisible robot")
+		save_dir = os.path.join(args.root_dir, 'metaworld_'+args.env_name+'_expert_invis.zarr')
+	else:
+		print("Using visible robot")
+		save_dir = os.path.join(args.root_dir, 'metaworld_'+args.env_name+'_expert.zarr')
+	 
 	if os.path.exists(save_dir):
 		cprint('Data already exists at {}'.format(save_dir), 'red')
 		cprint("If you want to overwrite, delete the existing directory first.", "red")
@@ -55,7 +60,7 @@ def main(args):
 	full_state_arrays = []
 	action_arrays = []
 	episode_ends_arrays = []
-    
+	
 	
 	episode_idx = 0
 	
@@ -133,9 +138,9 @@ def main(args):
 
 	# save data
  	###############################
-    # save data
-    ###############################
-    # create zarr file
+	# save data
+	###############################
+	# create zarr file
 	zarr_root = zarr.group(save_dir)
 	zarr_data = zarr_root.create_group('data')
 	zarr_meta = zarr_root.create_group('meta')
@@ -183,11 +188,39 @@ def main(args):
 
  
 if __name__ == "__main__":
-    
+	def str2bool(v):
+		if isinstance(v, bool):
+			return v
+		if v.lower() in ('yes', 'true', 't', 'y', '1'):
+			return True
+		elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+			return False
+		else:
+			raise argparse.ArgumentTypeError('Boolean value expected.')
+
 	parser = argparse.ArgumentParser()
 	parser.add_argument('--env_name', type=str, default='basketball')
 	parser.add_argument('--num_episodes', type=int, default=10)
 	parser.add_argument('--root_dir', type=str, default="../../3D-Diffusion-Policy/data/" )
-
+	parser.add_argument('--robovis',type=str2bool, default=True)
+	pwd=os.path.dirname(os.path.abspath(__file__))
+	# print(pwd)
+	# input()
+	target=r'./metaworld/envs/assets_v2/objects/assets/xyz_base.xml'
+	invis=r'./metaworld/envs/assets_v2/objects/assets/xyz_base_invis.xml'
+	vis=r'./metaworld/envs/assets_v2/objects/assets/xyz_base_vis.xml'
 	args = parser.parse_args()
+	if args.robovis:
+
+		#将机器热调成不透明（可视状态），把vis.xml 复制到base.xml
+		os.system(f'cp {vis} {target}')
+	else:
+		#将机器热调成透明（不可视状态），把invis.xml 复制到base.xml
+		os.system(f'cp {invis} {target}')
+
+
 	main(args)
+ 
+	# 还原状态防止影响eval 把vis 复制到base.xml
+	os.system(f'cp {vis} {target}')
+	

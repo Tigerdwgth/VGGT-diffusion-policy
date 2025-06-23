@@ -80,6 +80,9 @@ class DP3(BasePolicy):
                 global_cond_dim = obs_feature_dim
             else:
                 global_cond_dim = obs_feature_dim * n_obs_steps
+        cprint(f"[DiffusionUnetHybridPointcloudPolicy] obs_feature_dim: {obs_feature_dim}", "yellow")
+        cprint(f"[DiffusionUnetHybridPointcloudPolicy] input_dim: {input_dim}", "yellow")
+        cprint(f"[DiffusionUnetHybridPointcloudPolicy] global_cond_dim: {global_cond_dim}", "yellow")
                 
 
         self.use_pc_color = use_pc_color

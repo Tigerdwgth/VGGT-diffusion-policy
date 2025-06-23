@@ -21,7 +21,9 @@ class MetaworldDataset(BaseDataset):
             ):
         super().__init__()
         self.replay_buffer = ReplayBuffer.copy_from_path(
-            zarr_path, keys=['state', 'action', 'point_cloud'])
+            zarr_path, keys=['state', 'action', 'point_cloud','img'])
+        
+        
         val_mask = get_val_mask(
             n_episodes=self.replay_buffer.n_episodes, 
             val_ratio=val_ratio,
@@ -60,6 +62,7 @@ class MetaworldDataset(BaseDataset):
             'action': self.replay_buffer['action'],
             'agent_pos': self.replay_buffer['state'][...,:],
             'point_cloud': self.replay_buffer['point_cloud'],
+            'image': self.replay_buffer['img'],
         }
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
@@ -71,11 +74,14 @@ class MetaworldDataset(BaseDataset):
     def _sample_to_data(self, sample):
         agent_pos = sample['state'][:,].astype(np.float32)
         point_cloud = sample['point_cloud'][:,].astype(np.float32)
+        image=sample['img'][:,].astype(np.float32)
 
         data = {
             'obs': {
                 'point_cloud': point_cloud, 
                 'agent_pos': agent_pos, 
+                'image': image
+
             },
             'action': sample['action'].astype(np.float32)
         }

@@ -177,10 +177,14 @@ class ConditionalUnet1D(nn.Module):
             nn.Mish(),
             nn.Linear(dsed * 4, dsed),
         )
+        # cprint("[Unet] diffusion step encoder: ",color='red')
         cond_dim = dsed
         if global_cond_dim is not None:
             cond_dim += global_cond_dim
-
+        # cond_dim+=
+        # cprint(f"[Unet] global cond dim: {global_cond_dim}",color='red')
+        # cprint(f"[Unet] cond dim: {cond_dim}",color='red')
+            
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
 
         local_cond_encoder = None
@@ -288,6 +292,7 @@ class ConditionalUnet1D(nn.Module):
             if self.condition_type == 'cross_attention':
                 timestep_embed = timestep_embed.unsqueeze(1).expand(-1, global_cond.shape[1], -1)
             global_feature = torch.cat([timestep_embed, global_cond], axis=-1)
+        # cprint(f"[Unet]global feature shape: {global_feature.shape}",color='red')
 
 
         # encode local features
@@ -302,8 +307,8 @@ class ConditionalUnet1D(nn.Module):
         
         x = sample
         h = []
-        # print("unet input shape: ", x.shape)
-        # print("global feature shape: ", global_feature.shape)
+        # cprint(f"[Unet]unet input shape: { x.shape}",color='red')
+        # cprint(f"[Unet]global feature shape: {global_feature.shape}",color='red')
         for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
             if self.use_down_condition:
                 x = resnet(x, global_feature)
