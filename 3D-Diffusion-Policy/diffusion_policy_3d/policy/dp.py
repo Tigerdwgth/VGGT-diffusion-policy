@@ -22,7 +22,7 @@ from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.common.model_util import print_params
 from diffusion_policy_3d.model.vision.pointnet_extractor import DP3Encoder
 from diffusion_policy_3d.model.vision.pointnet_extractor import create_mlp
-from diffusion_policy_3d.model.vision.vggt.vggt.models.vggt_enc import VGGT_ENC
+from diffusion_policy_3d.model.vision.vggt.models.vggt_enc import VGGT_ENC
 class DP(BasePolicy):
     def __init__(self, 
             shape_meta: dict,
