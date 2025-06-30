@@ -178,7 +178,7 @@ class MetaworldRunner(BaseRunner):
             # print(f"Saving video to {save_video_path}")
             # env.env.save_video(save_video_path, videos, fps=self.fps, crf=self.crf)
             
-            # log_data[f'sim_video_eval'] = videos_wandb
+            log_data[f'sim_video_eval'] = videos_wandb
 
         _ = env.reset()
         videos = None

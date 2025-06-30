@@ -24,6 +24,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Dict, Tuple, Union, List, Type
 from termcolor import cprint
+from r3m import load_r3m
 
 
 
@@ -51,11 +52,11 @@ class DPEncoder(nn.Module):
 
         # 初始化 ResNet 编码器
         if resnet_type == 'resnet18':
-            self.extractor = models.resnet18(pretrained=pretrained)
+            self.extractor = load_r3m('resnet18')
         elif resnet_type == 'resnet34':
-            self.extractor = models.resnet34(pretrained=pretrained)
+            self.extractor = load_r3m('resnet34')
         elif resnet_type == 'resnet50':
-            self.extractor = models.resnet50(pretrained=pretrained)
+            self.extractor = load_r3m('resnet50')
         else:
             raise NotImplementedError(f"ResNet type {resnet_type} is not supported")
 

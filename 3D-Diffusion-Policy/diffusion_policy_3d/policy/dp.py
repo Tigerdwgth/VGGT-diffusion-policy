@@ -7,10 +7,8 @@ import torch.nn.functional as F
 from einops import rearrange, reduce
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from termcolor import cprint
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
 import copy
-import time
-import numpy as np
-import pytorch3d.ops as torch3d_ops
 
 
 
@@ -20,7 +18,6 @@ from diffusion_policy_3d.model.diffusion.conditional_unet1d import ConditionalUn
 from diffusion_policy_3d.model.diffusion.mask_generator import LowdimMaskGenerator
 from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.common.model_util import print_params
-from diffusion_policy_3d.model.vision.pointnet_extractor import DP3Encoder
 from diffusion_policy_3d.model.vision.pointnet_extractor import create_mlp
 from diffusion_policy_3d.model.vision.vggt.models.vggt_enc import VGGT_ENC
 class DP(BasePolicy):
@@ -240,6 +237,7 @@ class DP(BasePolicy):
         # handle different ways of passing observation
         local_cond = None
         global_cond = None
+        # B,T -> B*T 
         this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
         this_state=this_nobs['agent_pos']
         if self.obs_as_global_cond:
@@ -250,6 +248,7 @@ class DP(BasePolicy):
                 nobs_features=torch.concat([nobs_features['img_feat'],nobs_features['state_feat']], dim=-1)
             else:
                 nobs_features = nobs_features['img_feat']
+                
                 
             if "cross_attention" in self.condition_type:
                 # treat as a sequence
@@ -263,7 +262,6 @@ class DP(BasePolicy):
             
         else:
             # condition through impainting 
-            this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
             if this_nobs['image'].shape[1] != 3:
                 this_nobs['image'] = this_nobs['image'].permute(0, 3, 1, 2)
             nobs_features = self.obs_encoder(this_nobs)
@@ -347,6 +345,7 @@ class DP(BasePolicy):
             nobs_features = self.obs_encoder(this_nobs)
             img_feat = nobs_features['img_feat']
             if self.prio_as_cond:
+                # import pdb;pdb.set_trace()
                 nobs_features=torch.concat([nobs_features['img_feat'],nobs_features['state_feat']], dim=-1)
             else:
                 nobs_features = nobs_features['img_feat']
@@ -439,10 +438,7 @@ class DP(BasePolicy):
 
         loss = F.mse_loss(pred, target, reduction='none')
         loss = loss * loss_mask.type(loss.dtype)
-        loss = reduce(loss, 'b ... -> b (...)', 'mean')
-        
-        
-        
+        loss = reduce(loss, 'b ... -> b (...)', 'mean')  
         loss = loss.mean()
         #add proprioception loss
         
@@ -481,6 +477,7 @@ class DPEncoder(nn.Module):
                  pointnet_type='pointnet',
                  enc_type='vggt',
                  prio_as_cond=True,
+                 mean_and_linear=True
                  ):
         super().__init__()
         self.imagination_key = 'imagin_robot'
@@ -510,6 +507,7 @@ class DPEncoder(nn.Module):
         self.use_pc_color = use_pc_color
         self.pointnet_type = pointnet_type
         self.enc_type=enc_type
+        self.mean_and_linear = mean_and_linear
         if enc_type =='resnet18':
             self.extractor=torchvision.models.resnet18(pretrained=True)
             self.extractor.fc = nn.Linear(self.extractor.fc.in_features, out_channel)
@@ -525,7 +523,7 @@ class DPEncoder(nn.Module):
             # 加载全部权重
             weights = load_file(cache_dir, device='cpu')  # 使用 CPU 设备加载权重
             # 只保留 aggregator 部分
-            agg_weights = {k.replace("aggregator.", ""): v for k, v in weights.items() if k.startswith("aggregator.")}
+            agg_weights = {k: v for k, v in weights.items() if k.startswith("aggregator.")}
             # 加载到 aggregator 模型
             self.extractor = VGGT_ENC()
             self.extractor.load_state_dict(agg_weights, strict=False)
@@ -533,11 +531,28 @@ class DPEncoder(nn.Module):
             for param in self.extractor.parameters():
                 param.requires_grad = False
                 
-            self.projector = nn.Sequential(
-                nn.Linear(2048, out_channel),
-                nn.GELU(),
-                nn.Linear(out_channel, out_channel)
-            )
+            if self.mean_and_linear:
+                self.projector = nn.Sequential(
+                    nn.Linear(2048, out_channel),
+                    nn.GELU(),
+                    nn.Linear(out_channel, out_channel)
+                )
+            else:
+                self.transformer_encoder_layer = TransformerEncoderLayer(
+                    d_model=2048,   
+                    nhead=8,
+                    dim_feedforward=2048,
+                    dropout=0.1,
+                    activation='gelu',
+                    batch_first=True
+                )
+                self.projector = nn.Sequential(
+                    TransformerEncoder(
+                    self.transformer_encoder_layer,
+                    num_layers=1),
+                    nn.Linear(2048, out_channel),
+                )
+                
             #only load the encoder part with safetensor
             # weight=
             #token fusion
@@ -580,34 +595,38 @@ class DPEncoder(nn.Module):
     
     def forward(self, observations: Dict) -> torch.Tensor:
         images = observations[self.rgb_image_key]
-        # b*c*h*w
+        #images shape [B*To*views C,H,W]
         # assert len(images.shape) == 4, cprint(f"point cloud shape: {images.shape}, length should be 4", "red")
         if self.use_imagined_robot:
             img_points = observations[self.imagination_key][..., :images.shape[-1]] # align the last dim
             images = torch.concat([images, img_points], dim=1)
         if self.enc_type != 'vggt':
             img_feat = self.extractor(images)# B * out_channel
-            
-        # points = torch.transpose(points, 1, 2)   # B * 3 * N
-        # points: B * 3 * (N + sum(Ni))
-        # print("DP3extractor",{points.shape})
         else:
-            #input size
-            # if not batched 
-        
-            if len(images.shape) == 5:
-                images = rearrange(images, 'obs_stepXframes c h w -> 1 obs_stepXframes c h w')
             bsz=images.shape[0]
             #resize image height and width to be divisible by 14 
             h, w = images.shape[-2], images.shape[-1]
             new_h = math.ceil(h / 14) * 14
             new_w = math.ceil(w / 14) * 14
             images= F.interpolate(images, size=(new_h, new_w), mode='bilinear', align_corners=False)
-
-            # images = rearrange(images, 'b s f c h w -> (b s) f c h w')
+            if len(images.shape) == 4:
+                images = rearrange(images, 'obs_stepXframes c h w -> obs_stepXframes 1 c h w')
+                # images = rearrange(images, 'b s f c h w -> (b s) f c h w')
+                # not without batch but B*To (1frame) c h w
             img_feat = self.extractor(images) # b*obs_steps frames patchnums dims
-            img_feat = reduce(img_feat, 'bs f p d -> bs f d', 'mean') # b*obs_steps frames dims
-            img_feat = self.projector(img_feat) # (b s) f d
+            #B*To f patch token_dim
+            if self.mean_and_linear:
+                img_feat = reduce(img_feat, 'bs f p d -> bs f d', 'mean') # b*obs_steps frames dims
+                img_feat = self.projector(img_feat) # (b s) f d
+            else:
+                # view positional encoding
+                img_feat = rearrange(img_feat, 'bs f p d -> bs (f p) d') #[B*T F* patchnums, dims]
+                img_feat = self.projector(img_feat) # (b s) f d
+                
+                
+                
+            
+            img_feat = img_feat.reshape(bsz, -1) 
             
             
         state_feat = None

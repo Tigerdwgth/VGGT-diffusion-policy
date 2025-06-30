@@ -26,7 +26,7 @@ class MetaWorldEnv(gym.Env):
                  num_points=1024,
                  ):
         super(MetaWorldEnv, self).__init__()
-
+        self.disturbance = 0
         if '-v2' not in task_name:
             task_name = task_name + '-v2-goal-observable'
 
@@ -202,40 +202,44 @@ class MetaWorldEnv(gym.Env):
         # self.pc_generator.cam_pos = self.env.sim.model.cam_pos[2]
             ## 随机调整相机角度
         # 原始四元数
-        def mjc2sci_quat(mjc_quat):
-            """_summary_
+        def add_rot_noise_to_camera():
+            def mjc2sci_quat(mjc_quat):
+                """_summary_
 
-            Args:
-                mjc_quat (_type_): quaternion in mujoco format [w, x, y, z]
+                Args:
+                    mjc_quat (_type_): quaternion in mujoco format [w, x, y, z]
 
-            Returns:
-                _type_: _description_
-            """
-            return [mjc_quat[1], mjc_quat[2], mjc_quat[3], mjc_quat[0]]
-        def sci2mjc_quat(sci_quat):
-            return [sci_quat[3], sci_quat[0], sci_quat[1], sci_quat[2]]
-        original_quat = self.origin_quat 
-        # print("original quat: ", original_quat) 
-        original_rotation = R.from_quat(mjc2sci_quat(original_quat))  # 将四元数转换为旋转对象
+                Returns:
+                    _type_: _description_
+                """
+                return [mjc_quat[1], mjc_quat[2], mjc_quat[3], mjc_quat[0]]
+            def sci2mjc_quat(sci_quat):
+                return [sci_quat[3], sci_quat[0], sci_quat[1], sci_quat[2]]
+            original_quat = self.origin_quat 
+            # print("original quat: ", original_quat) 
+            original_rotation = R.from_quat(mjc2sci_quat(original_quat))  # 将四元数转换为旋转对象
 
-        # 随机生成欧拉角变动（限制在 ±30 度范围内）
-        self.disturbance = 0
-        disturbance = self.disturbance
-        delta_roll = np.random.uniform(-disturbance, disturbance)  # 绕 x 轴旋转
-        delta_pitch = np.random.uniform(-disturbance, disturbance)  # 绕 y 轴旋转
-        delta_yaw = np.random.uniform(-disturbance, disturbance)  # 绕 z 轴旋转
-        delta_rotation = R.from_euler('xyz', [delta_roll, delta_pitch, delta_yaw],degrees= True)  # 生成旋转变换
-        new_rotation = original_rotation * delta_rotation  # 计算新的旋转
-        # 计算新的相机位置
-        # 打印新的旋转角度
-        new_euler = new_rotation.as_euler('xyz', degrees=True)
-        # print(f"New camera rotation (degrees): roll={new_euler[0]}, pitch={new_euler[1]}, yaw={new_euler[2]}")
-        # 更新相机角度
+            # 随机生成欧拉角变动（限制在 ±30 度范围内）
 
-        self.env.sim.model.cam_quat[2] = sci2mjc_quat(new_rotation.as_quat())
+            disturbance = self.disturbance
+            delta_roll = np.random.uniform(-disturbance, disturbance)  # 绕 x 轴旋转
+            delta_pitch = np.random.uniform(-disturbance, disturbance)  # 绕 y 轴旋转
+            delta_yaw = np.random.uniform(-disturbance, disturbance)  # 绕 z 轴旋转
+            delta_rotation = R.from_euler('xyz', [delta_roll, delta_pitch, delta_yaw],degrees= True)  # 生成旋转变换
+            new_rotation = original_rotation * delta_rotation  # 计算新的旋转
+            # 计算新的相机位置
+            # 打印新的旋转角度
+            new_euler = new_rotation.as_euler('xyz', degrees=True)
+            # print(f"New camera rotation (degrees): roll={new_euler[0]}, pitch={new_euler[1]}, yaw={new_euler[2]}")
+            # 更新相机角度
+
+            self.env.sim.model.cam_quat[2] = sci2mjc_quat(new_rotation.as_quat())
+            
+            self.pc_transform = R.from_matrix(self.old_pc_transform)*delta_rotation
+            self.pc_transform = self.pc_transform.as_matrix()
         
-        self.pc_transform = R.from_matrix(self.old_pc_transform)*delta_rotation
-        self.pc_transform = self.pc_transform.as_matrix()
+        if self.disturbance > 0:
+            add_rot_noise_to_camera()
         
         
         
