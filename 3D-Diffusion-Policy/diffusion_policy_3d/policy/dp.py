@@ -47,6 +47,7 @@ class DP(BasePolicy):
             pointcloud_encoder_cfg=None,
             # parameters passed to step,
             pc_noise=False,
+            enc_type='resnet18',
             prio_as_cond=True,
             visual_prio_training=True,
             **kwargs):
@@ -83,6 +84,7 @@ class DP(BasePolicy):
                                          use_pc_color=use_pc_color,
                                          pointnet_type=pointnet_type,
                                          prio_as_cond=prio_as_cond,
+                                         enc_type=enc_type,
                                          )
             
 
