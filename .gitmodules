@@ -1,0 +1,8 @@
+[submodule "3D-Diffusion-Policy/diffusion_policy_3d/model/vision/vggt"]
+    path = 3D-Diffusion-Policy/diffusion_policy_3d/model/vision/vggt
+    url = https://github.com/Tigerdwgth/VGGT-Encoder.git
+
+[submodule "3D-Diffusion-Policy/diffusion_policy_3d/model/vision/r3m"]
+    path = 3D-Diffusion-Policy/diffusion_policy_3d/model/vision/r3m
+    url = https://github.com/facebookresearch/r3m.git
+
