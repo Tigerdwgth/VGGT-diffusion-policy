@@ -21,7 +21,7 @@ from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.common.model_util import print_params
 from diffusion_policy_3d.model.vision.pointnet_extractor import create_mlp
 from diffusion_policy_3d.model.vision.vggt.models.vggt_enc import VGGT_ENC
-
+from torch.utils.checkpoint import checkpoint
 class DP(BasePolicy):
     def __init__(self, 
             shape_meta: dict,
@@ -53,6 +53,7 @@ class DP(BasePolicy):
             vggt_depth=24,
             transformer_projector_depth=2,
             flow_matching=True,
+            vggtq=True,
             **kwargs):
         super().__init__()
 
@@ -81,6 +82,7 @@ class DP(BasePolicy):
                                          enc_type=enc_type,
                                          mean_and_linear=mean_and_linear,
                                          vggt_depth=vggt_depth,
+                                         vggtq=vggtq,
                                          transformer_projector_depth=transformer_projector_depth,
                                          )
             
@@ -502,6 +504,8 @@ class DPEncoder(nn.Module):
                  mean_and_linear=True,
                  vggt_depth=24,
                  transformer_projector_depth=2,
+                 vggtq=False,
+                 **kwargsq
                  ):
         super().__init__()
         self.imagination_key = 'imagin_robot'
@@ -510,6 +514,7 @@ class DPEncoder(nn.Module):
         self.rgb_image_key = 'image'
         self.n_output_channels = out_channel
         self.prio_as_cond = prio_as_cond
+        self.vggtq = vggtq
         
         
         self.use_imagined_robot = self.imagination_key in observation_space.keys()
@@ -536,6 +541,10 @@ class DPEncoder(nn.Module):
         elif enc_type == 'vggt':
             self.extractor = VGGT_ENC(depth=vggt_depth)
             self.extractor.load_weight_freeze()
+            if vggtq:
+                self.extractor.ptq_quantize()
+                # self.extractor.gradient_checkpointing_enable()
+                cprint(f"[VGGDPEncoder] vggtq is enabled, using quantized vggt for smaller vram", "yellow")
             #load weight from cache
             if self.mean_and_linear:
                 self.projector = nn.Sequential(
@@ -611,8 +620,11 @@ class DPEncoder(nn.Module):
                 images = rearrange(images, 'obs_stepXframes c h w -> obs_stepXframes 1 c h w')
                 # images = rearrange(images, 'b s f c h w -> (b s) f c h w')
                 # not without batch but B*To (1frame) c h w
-            with torch.amp.autocast("cuda",dtype=torch.bfloat16):
-                img_feat = self.extractor(images) # b*obs_steps frames patchnums dims
+            if not self.vggtq:
+                with torch.amp.autocast("cuda",dtype=torch.bfloat16):
+                    img_feat = self.extractor(images) # b*obs_steps frames patchnums dims
+            else:
+                img_feat = checkpoint(self.extractor,images) # b*obs_steps frames patchnums dims
             #B*To f patch token_dim
             if self.mean_and_linear:
                 img_feat = reduce(img_feat, 'bs f p d -> bs f d', 'mean') # b*obs_steps frames dims
