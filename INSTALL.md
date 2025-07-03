@@ -39,12 +39,23 @@ First, git clone this repo and `cd` into it.
 ---
 
 4.install mujoco in `~/.mujoco`
-
+    ```sh
     cd ~/.mujoco
     wget https://github.com/deepmind/mujoco/releases/download/2.1.0/mujoco210-linux-x86_64.tar.gz -O mujoco210.tar.gz --no-check-certificate
 
     tar -xvzf mujoco210.tar.gz
+     
+    conda install mesalib --solver=classic
+    conda install  glew  --solver=classic
+    conda install  mesalib  --solver=classic
+    conda install glfw3  --solver=classic
+    
+    #if sudo
+    sudo apt-get install libgl1-mesa-glx libgl1-mesa-dri libglew2.1 libglfw3
 
+    #Then add your conda environment include to CPATH (put this in your .bashrc to make it permanent):
+    export CPATH=$CONDA_PREFIX/include
+    ```
 and put the following into your bash script (usually in `YOUR_HOME_PATH/.bashrc`). Remember to `source ~/.bashrc` to make it work and then open a new terminal.
 
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${HOME}/.mujoco/mujoco210/bin
