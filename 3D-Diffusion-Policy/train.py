@@ -23,6 +23,7 @@ from termcolor import cprint
 import shutil
 import time
 import threading
+from accelerate import Accelerator
 from hydra.core.hydra_config import HydraConfig
 from diffusion_policy_3d.policy.dp3 import DP3
 from diffusion_policy_3d.dataset.base_dataset import BaseDataset

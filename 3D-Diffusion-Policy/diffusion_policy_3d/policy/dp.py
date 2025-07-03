@@ -6,12 +6,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, reduce
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from diffusers.schedulers import DPMSolverMultistepScheduler
+
 from termcolor import cprint
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 import copy
 
-
-
+from diffusion_policy_3d.policy.meanflow import MeanFlow
 from diffusion_policy_3d.model.common.normalizer import LinearNormalizer
 from diffusion_policy_3d.policy.base_policy import BasePolicy
 from diffusion_policy_3d.model.diffusion.conditional_unet1d import ConditionalUnet1D
@@ -20,6 +21,7 @@ from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.common.model_util import print_params
 from diffusion_policy_3d.model.vision.pointnet_extractor import create_mlp
 from diffusion_policy_3d.model.vision.vggt.models.vggt_enc import VGGT_ENC
+
 class DP(BasePolicy):
     def __init__(self, 
             shape_meta: dict,
@@ -47,11 +49,16 @@ class DP(BasePolicy):
             enc_type='resnet18',
             prio_as_cond=True,
             visual_prio_training=True,
+            mean_and_linear=False,
+            vggt_depth=24,
+            transformer_projector_depth=2,
+            flow_matching=True,
             **kwargs):
         super().__init__()
 
         self.condition_type = condition_type
         self.prio_as_cond = prio_as_cond
+        self.flow_matching = flow_matching
         # parse shape_meta
         action_shape = shape_meta['action']['shape']
         self.action_shape = action_shape
@@ -64,16 +71,6 @@ class DP(BasePolicy):
             
         obs_shape_meta = shape_meta['obs']
         obs_dict = dict_apply(obs_shape_meta, lambda x: x['shape'])
-
-
-        # obs_encoder = DP3Encoder(observation_space=obs_dict,
-        #                                            img_crop_shape=crop_shape,
-        #                                         out_channel=encoder_output_dim,
-        #                                         pointcloud_encoder_cfg=pointcloud_encoder_cfg,
-        #                                         use_pc_color=use_pc_color,
-        #                                         pointnet_type=pointnet_type,
-        #                                         )
-        #ues pretrained resnet18
         obs_encoder= DPEncoder(observation_space=obs_dict,
                                             img_crop_shape=crop_shape,
                                          out_channel=encoder_output_dim,
@@ -82,6 +79,9 @@ class DP(BasePolicy):
                                          pointnet_type=pointnet_type,
                                          prio_as_cond=prio_as_cond,
                                          enc_type=enc_type,
+                                         mean_and_linear=mean_and_linear,
+                                         vggt_depth=vggt_depth,
+                                         transformer_projector_depth=transformer_projector_depth,
                                          )
             
 
@@ -157,7 +157,8 @@ class DP(BasePolicy):
             num_inference_steps = noise_scheduler.config.num_train_timesteps
         self.num_inference_steps = num_inference_steps
 
-        
+        if flow_matching:
+            self.MF=MeanFlow()
         
         #本体感知模块，一个三层的mlp用于直接预测机器人的状态
         
@@ -277,14 +278,30 @@ class DP(BasePolicy):
             cond_data[:,:To,Da:] = nobs_features
             cond_mask[:,:To,Da:] = True
 
-
-        # run sampling
-        nsample = self.conditional_sample(
-            cond_data, 
-            cond_mask,
-            local_cond=local_cond,
-            global_cond=global_cond,
-            **self.kwargs)
+        if self.flow_matching:
+            # 对于flow matching，我们需要创建条件
+            if self.obs_as_global_cond:
+                # global_cond已经设置好了
+                flow_cond = global_cond
+            else:
+                # 对于impainting情况，我们使用观测特征作为条件
+                flow_cond = nobs_features.reshape(B, -1)
+            
+            nsample = self.MF.sample_action(
+                self.model,
+                c=flow_cond,
+                sample_steps=5,
+                device=str(device),
+                action_dim=Da,
+                horizon=T)
+        else:
+            # run sampling
+            nsample = self.conditional_sample(
+                cond_data, 
+                cond_mask,
+                local_cond=local_cond,
+                global_cond=global_cond,
+                **self.kwargs)
         
         # unnormalize prediction
         naction_pred = nsample[...,:Da]
@@ -371,11 +388,9 @@ class DP(BasePolicy):
             state_feat = nobs_features['state_feat']
             if self.prio_as_cond:
                 nobs_features=torch.concat([img_feat,state_feat], dim=-1)
-                
             else:
                 nobs_features = img_feat
                 
-
             # reshape back to B, T, Do
             nobs_features = nobs_features.reshape(batch_size, horizon, -1)
             if self.prio_as_cond:
@@ -387,59 +402,66 @@ class DP(BasePolicy):
         condition_mask = self.mask_generator(trajectory.shape)
 
         # Sample noise that we'll add to the images
-        noise = torch.randn(trajectory.shape, device=trajectory.device)
 
         
-        bsz = trajectory.shape[0]
-        # Sample a random timestep for each image
-        timesteps = torch.randint(
-            0, self.noise_scheduler.config.num_train_timesteps, 
-            (bsz,), device=trajectory.device
-        ).long()
-
-        # Add noise to the clean images according to the noise magnitude at each timestep
-        # (this is the forward diffusion process)
-        noisy_trajectory = self.noise_scheduler.add_noise(
-            trajectory, noise, timesteps)
-        
-
-        
-        # compute loss mask
-        loss_mask = ~condition_mask
-
-        # apply conditioning
-        noisy_trajectory[condition_mask] = cond_data[condition_mask]
-
-        pred = self.model(sample=noisy_trajectory, 
-                        timestep=timesteps, 
-                            local_cond=local_cond, 
-                            global_cond=global_cond)
-        
-
-        pred_type = self.noise_scheduler.config.prediction_type 
-        if pred_type == 'epsilon':
-            target = noise
-        elif pred_type == 'sample':
-            target = trajectory
-        elif pred_type == 'v_prediction':
-            # https://github.com/huggingface/diffusers/blob/main/src/diffusers/schedulers/scheduling_dpmsolver_multistep.py
-            # https://github.com/huggingface/diffusers/blob/v0.11.1-patch/src/diffusers/schedulers/scheduling_dpmsolver_multistep.py
-            # sigma = self.noise_scheduler.sigmas[timesteps]
-            # alpha_t, sigma_t = self.noise_scheduler._sigma_to_alpha_sigma_t(sigma)
-            self.noise_scheduler.alpha_t = self.noise_scheduler.alpha_t.to(self.device)
-            self.noise_scheduler.sigma_t = self.noise_scheduler.sigma_t.to(self.device)
-            alpha_t, sigma_t = self.noise_scheduler.alpha_t[timesteps], self.noise_scheduler.sigma_t[timesteps]
-            alpha_t = alpha_t.unsqueeze(-1).unsqueeze(-1)
-            sigma_t = sigma_t.unsqueeze(-1).unsqueeze(-1)
-            v_t = alpha_t * noise - sigma_t * trajectory
-            target = v_t
+        if self.flow_matching:
+            # model_partial= partial(self.model,
+            #                     sample=noisy_trajectory, 
+            #                     timestep=timesteps, 
+            #                     local_cond=local_cond, 
+            #                     global_cond=global_cond)
+            loss, mse_val = self.MF.loss(self.model, trajectory, c=global_cond)
         else:
-            raise ValueError(f"Unsupported prediction type {pred_type}")
+            noise = torch.randn(trajectory.shape, device=trajectory.device)
 
-        loss = F.mse_loss(pred, target, reduction='none')
-        loss = loss * loss_mask.type(loss.dtype)
-        loss = reduce(loss, 'b ... -> b (...)', 'mean')  
-        loss = loss.mean()
+            
+            bsz = trajectory.shape[0]
+            # Sample a random timestep for each image
+            timesteps = torch.randint(
+                0, self.noise_scheduler.config.num_train_timesteps, 
+                (bsz,), device=trajectory.device
+            ).long()
+
+            # Add noise to the clean images according to the noise magnitude at each timestep
+            # (this is the forward diffusion process)
+            noisy_trajectory = self.noise_scheduler.add_noise(
+                trajectory, noise, timesteps)
+            # compute loss mask
+            loss_mask = ~condition_mask
+
+            # apply conditioning
+            noisy_trajectory[condition_mask] = cond_data[condition_mask]
+
+            pred = self.model(sample=noisy_trajectory, 
+                            timestep=timesteps, 
+                                local_cond=local_cond, 
+                                global_cond=global_cond)
+            
+
+            pred_type = self.noise_scheduler.config.prediction_type 
+            if pred_type == 'epsilon':
+                target = noise
+            elif pred_type == 'sample':
+                target = trajectory
+            elif pred_type == 'v_prediction':
+                # https://github.com/huggingface/diffusers/blob/main/src/diffusers/schedulers/scheduling_dpmsolver_multistep.py
+                # https://github.com/huggingface/diffusers/blob/v0.11.1-patch/src/diffusers/schedulers/scheduling_dpmsolver_multistep.py
+                sigma = self.noise_scheduler.sigmas[timesteps]
+                alpha_t, sigma_t = self.noise_scheduler._sigma_to_alpha_sigma_t(sigma)
+                self.noise_scheduler.alpha_t = self.noise_scheduler.alpha_t.to(self.device)
+                self.noise_scheduler.sigma_t = self.noise_scheduler.sigma_t.to(self.device)
+                alpha_t, sigma_t = self.noise_scheduler.alpha_t[timesteps], self.noise_scheduler.sigma_t[timesteps]
+                alpha_t = alpha_t.unsqueeze(-1).unsqueeze(-1)
+                sigma_t = sigma_t.unsqueeze(-1).unsqueeze(-1)
+                v_t = alpha_t * noise - sigma_t * trajectory
+                target = v_t
+            else:
+                raise ValueError(f"Unsupported prediction type {pred_type}")
+
+            loss = F.mse_loss(pred, target, reduction='none')
+            loss = loss * loss_mask.type(loss.dtype)
+            loss = reduce(loss, 'b ... -> b (...)', 'mean')  
+            loss = loss.mean()
         #add proprioception loss
         
         # 本体感知
@@ -477,7 +499,9 @@ class DPEncoder(nn.Module):
                  pointnet_type='pointnet',
                  enc_type='vggt',
                  prio_as_cond=True,
-                 mean_and_linear=True
+                 mean_and_linear=True,
+                 vggt_depth=24,
+                 transformer_projector_depth=2,
                  ):
         super().__init__()
         self.imagination_key = 'imagin_robot'
@@ -498,11 +522,6 @@ class DPEncoder(nn.Module):
             
         
         
-        cprint(f"[DP3Encoder] point cloud shape: {self.point_cloud_shape}", "yellow")
-        cprint(f"[DP3Encoder] state shape: {self.state_shape}", "yellow")
-        cprint(f"[DP3Encoder] imagination point shape: {self.imagination_shape}", "yellow")
-        # print("encoder_output_dim",out_channel)
-        cprint(f"[DP3Encoder] encoder_output_dim: {out_channel}", "yellow")
 
         self.use_pc_color = use_pc_color
         self.pointnet_type = pointnet_type
@@ -515,22 +534,9 @@ class DPEncoder(nn.Module):
             self.extractor=torchvision.models.resnet50(pretrained=True)
             self.extractor.fc = nn.Linear(self.extractor.fc.in_features, out_channel)
         elif enc_type == 'vggt':
-            # self.extractor = VGGT_ENC().from_pretrained("facebook/VGGT-1B")
+            self.extractor = VGGT_ENC(depth=vggt_depth)
+            self.extractor.load_weight_freeze()
             #load weight from cache
-            cprint(f"[VGGTEncoder] using vggt encoder")
-            cache_dir='/home/jdh/nvme2/hub/models--facebook--VGGT-1B/snapshots/860abec7937da0a4c03c41d3c269c366e82abdf9/model.safetensors'
-            from safetensors.torch import load_file
-            # 加载全部权重
-            weights = load_file(cache_dir, device='cpu')  # 使用 CPU 设备加载权重
-            # 只保留 aggregator 部分
-            agg_weights = {k: v for k, v in weights.items() if k.startswith("aggregator.")}
-            # 加载到 aggregator 模型
-            self.extractor = VGGT_ENC()
-            self.extractor.load_state_dict(agg_weights, strict=False)
-            #do not train this part 
-            for param in self.extractor.parameters():
-                param.requires_grad = False
-                
             if self.mean_and_linear:
                 self.projector = nn.Sequential(
                     nn.Linear(2048, out_channel),
@@ -549,19 +555,10 @@ class DPEncoder(nn.Module):
                 self.projector = nn.Sequential(
                     TransformerEncoder(
                     self.transformer_encoder_layer,
-                    num_layers=1),
+                    num_layers=transformer_projector_depth),
                     nn.Linear(2048, out_channel),
                 )
-                
-            #only load the encoder part with safetensor
-            # weight=
-            #token fusion
-            #input size[ batch_size ,obs_steps ,frames ,3 , H *,W]
-            # reshape  [batch_size*obs_steps, frames, 3, H*,W]
-            # out_put_size=  [batch_size*obs_steps,frames,H*W/(patch_size*patch_size),2048]
-            # How to fuse the tokens to target output size?
-            # use mean
-            # targetsize [batch_size,obs_steps,frames,embed_dim]
+
 
         if len(state_mlp_size) == 0:
             raise RuntimeError(f"State mlp size is empty")
@@ -603,6 +600,7 @@ class DPEncoder(nn.Module):
         if self.enc_type != 'vggt':
             img_feat = self.extractor(images)# B * out_channel
         else:
+            # import pdb; pdb.set_trace()
             bsz=images.shape[0]
             #resize image height and width to be divisible by 14 
             h, w = images.shape[-2], images.shape[-1]
@@ -613,16 +611,29 @@ class DPEncoder(nn.Module):
                 images = rearrange(images, 'obs_stepXframes c h w -> obs_stepXframes 1 c h w')
                 # images = rearrange(images, 'b s f c h w -> (b s) f c h w')
                 # not without batch but B*To (1frame) c h w
-            img_feat = self.extractor(images) # b*obs_steps frames patchnums dims
+            with torch.amp.autocast("cuda",dtype=torch.bfloat16):
+                img_feat = self.extractor(images) # b*obs_steps frames patchnums dims
             #B*To f patch token_dim
             if self.mean_and_linear:
                 img_feat = reduce(img_feat, 'bs f p d -> bs f d', 'mean') # b*obs_steps frames dims
                 img_feat = self.projector(img_feat) # (b s) f d
+            # elif self.attention_pool:
+            #         # self.attn_pool = AttentionPool(2048, n_heads=8)
+            #         # self.projector = nn.Sequential(
+            #         #     nn.Linear(2048, out_channel),
+            #         #     nn.GELU(),
+            #         #     nn.Linear(out_channel, out_channel)
+            #         # )
+            #     #import attention pooling
+            #     self.projector = nn.Sequential()
             else:
                 # view positional encoding
                 img_feat = rearrange(img_feat, 'bs f p d -> bs (f p) d') #[B*T F* patchnums, dims]
+                # print(f"img_feat shape before projector: {img_feat.shape}")
                 img_feat = self.projector(img_feat) # (b s) f d
-                
+                img_feat = reduce(img_feat, 'bs f d -> bs d', 'mean')
+                # print(f"img_feat shape after projector: {img_feat.shape}")
+            
                 
                 
             

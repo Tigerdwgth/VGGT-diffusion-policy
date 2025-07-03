@@ -128,56 +128,58 @@ class MetaworldRunner(BaseRunner):
             videos = videos[:, 0]  # select first frame
         
         if save_video:       
-            #save agent poses
-            disturbance = env.env.disturbance
-            agent_poses = env.env.agent_poses
-            os.makedirs(f"{self.output_dir}/videos", exist_ok=True)
-            import dill
-            with open(f"{self.output_dir}/videos/{self.task_name}_{disturbance}_agent_poses.pkl", 'wb') as f:
-                dill.dump(agent_poses, f) 
-            videos_wandb = wandb.Video(videos, fps=self.fps, format="mp4")
+            #save agent poseo
             
-            save_video_path = f"{self.output_dir}/videos/{self.task_name}_{disturbance}_invis_eval.mp4"
-            print(len(videos)," ", videos.shape)
-            print(f"Saving video to {save_video_path}")
-            # 201   (201, 3, 128, 128) ->201 128 128 3
-            videos = np.transpose(videos, (0, 2, 3, 1))
-            import cv2
-            # save as mp4
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(save_video_path, fourcc, 10, (videos.shape[2], videos.shape[1]))
-            for i in range(videos.shape[0]):
-                out.write(videos[i])
-            out.release()
-            # #save ply
-            save_pc_path = f"{self.output_dir}/videos/{self.task_name}_{disturbance}_pc"
-            os.makedirs(save_pc_path, exist_ok=True)  # 确保目录存在
+            # disturbance = env.env.disturbance
+            # agent_poses = env.env.agent_poses
+            # os.makedirs(f"{self.output_dir}/videos", exist_ok=True)
+            # import dill
+            # with open(f"{self.output_dir}/videos/{self.task_name}_{disturbance}_agent_poses.pkl", 'wb') as f:
+            #     dill.dump(agent_poses, f) 
+          
             
-            for i, pc in enumerate(env.env.pcs):
-                # 检查点云数据
-                # print(f"pc shape: {pc.shape}, dtype: {pc.dtype}")
-                if pc.ndim != 2 or pc.shape[1] not in [3, 6]:
-                    raise ValueError(f"Invalid point cloud shape: {pc.shape}. Expected shape (N, 3) or (N, 6).")
+            # save_video_path = f"{self.output_dir}/videos/{self.task_name}_{disturbance}_invis_eval.mp4"
+            # print(len(videos)," ", videos.shape)
+            # print(f"Saving video to {save_video_path}")
+            # # 201   (201, 3, 128, 128) ->201 128 128 3
+            # videos = np.transpose(videos, (0, 2, 3, 1))
+            # import cv2
+            # # save as mp4
+            # fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            # out = cv2.VideoWriter(save_video_path, fourcc, 10, (videos.shape[2], videos.shape[1]))
+            # for i in range(videos.shape[0]):
+            #     out.write(videos[i])
+            # out.release()
+            # # #save ply
+            # save_pc_path = f"{self.output_dir}/videos/{self.task_name}_{disturbance}_pc"
+            # os.makedirs(save_pc_path, exist_ok=True)  # 确保目录存在
+            
+            # for i, pc in enumerate(env.env.pcs):
+            #     # 检查点云数据
+            #     # print(f"pc shape: {pc.shape}, dtype: {pc.dtype}")
+            #     if pc.ndim != 2 or pc.shape[1] not in [3, 6]:
+            #         raise ValueError(f"Invalid point cloud shape: {pc.shape}. Expected shape (N, 3) or (N, 6).")
                 
-                # 确保数据类型正确
-                pc = pc.astype(np.float32)
+            #     # 确保数据类型正确
+            #     pc = pc.astype(np.float32)
 
-                # 将 NumPy 数组转换为 Open3D 点云对象
-                point_cloud = o3d.geometry.PointCloud()
-                point_cloud.points = o3d.utility.Vector3dVector(pc[:, :3])  # 前 3 列是点的坐标
+            #     # 将 NumPy 数组转换为 Open3D 点云对象
+            #     point_cloud = o3d.geometry.PointCloud()
+            #     point_cloud.points = o3d.utility.Vector3dVector(pc[:, :3])  # 前 3 列是点的坐标
 
-                # 如果点云包含 RGB 信息，处理 RGB 数据
-                if pc.shape[1] == 6:
-                    colors = pc[:, 3:6] / 255.0  # 假设 RGB 值在 0-255 范围内，归一化到 0-1
-                    point_cloud.colors = o3d.utility.Vector3dVector(colors)
+            #     # 如果点云包含 RGB 信息，处理 RGB 数据
+            #     if pc.shape[1] == 6:
+            #         colors = pc[:, 3:6] / 255.0  # 假设 RGB 值在 0-255 范围内，归一化到 0-1
+            #         point_cloud.colors = o3d.utility.Vector3dVector(colors)
 
-                # 保存为 .ply 文件
-                o3d.io.write_point_cloud(save_pc_path + f"/{i}.ply", point_cloud)
+            #     # 保存为 .ply 文件
+            #     o3d.io.write_point_cloud(save_pc_path + f"/{i}.ply", point_cloud)
 
             
             # print(f"Saving video to {save_video_path}")
             # env.env.save_video(save_video_path, videos, fps=self.fps, crf=self.crf)
             
+            videos_wandb = wandb.Video(videos, fps=self.fps, format="mp4")
             log_data[f'sim_video_eval'] = videos_wandb
 
         _ = env.reset()

@@ -177,6 +177,12 @@ class ConditionalUnet1D(nn.Module):
             nn.Mish(),
             nn.Linear(dsed * 4, dsed),
         )
+        self.r_encoder= nn.Sequential(
+            SinusoidalPosEmb(dsed),
+            nn.Linear(dsed, dsed * 4),
+            nn.Mish(),
+            nn.Linear(dsed * 4, dsed),
+        )
         # cprint("[Unet] diffusion step encoder: ",color='red')
         cond_dim = dsed
         if global_cond_dim is not None:
@@ -267,6 +273,7 @@ class ConditionalUnet1D(nn.Module):
     def forward(self, 
             sample: torch.Tensor, 
             timestep: Union[torch.Tensor, float, int], 
+            r_timestep: Union[torch.Tensor, float, int] = None,
             local_cond=None, global_cond=None, **kwargs):
         """
         x: (B,T,input_dim)
@@ -278,16 +285,11 @@ class ConditionalUnet1D(nn.Module):
         sample = einops.rearrange(sample, 'b h t -> b t h')
 
         # 1. time
-        timesteps = timestep
-        if not torch.is_tensor(timesteps):
-            # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
-            timesteps = torch.tensor([timesteps], dtype=torch.long, device=sample.device)
-        elif torch.is_tensor(timesteps) and len(timesteps.shape) == 0:
-            timesteps = timesteps[None].to(sample.device)
-        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-        timesteps = timesteps.expand(sample.shape[0])
-
+        timesteps = self.format_timestep(sample, timestep)
+        r_timesteps = self.format_timestep(sample, r_timestep) if r_timestep is not None else timesteps
         timestep_embed = self.diffusion_step_encoder(timesteps)
+        r_timestep_embed = self.r_encoder(r_timesteps)
+        timestep_embed = timestep_embed + r_timestep_embed
         if global_cond is not None:
             if self.condition_type == 'cross_attention':
                 timestep_embed = timestep_embed.unsqueeze(1).expand(-1, global_cond.shape[1], -1)
@@ -351,4 +353,15 @@ class ConditionalUnet1D(nn.Module):
         x = einops.rearrange(x, 'b t h -> b h t')
 
         return x
+
+    def format_timestep(self, sample, timestep):
+        timesteps = timestep
+        if not torch.is_tensor(timesteps):
+            # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
+            timesteps = torch.tensor([timesteps], dtype=torch.long, device=sample.device)
+        elif torch.is_tensor(timesteps) and len(timesteps.shape) == 0:
+            timesteps = timesteps[None].to(sample.device)
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        timesteps = timesteps.expand(sample.shape[0])
+        return timesteps
 
