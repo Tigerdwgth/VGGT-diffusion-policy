@@ -46,9 +46,12 @@ First, git clone this repo and `cd` into it.
     tar -xvzf mujoco210.tar.gz
      
     conda install mesalib --solver=classic
-    conda install -c conda-forge glew
-    conda install -c conda-forge mesalib
-    conda install -c menpo glfw3
+    conda install  glew  --solver=classic
+    conda install  mesalib  --solver=classic
+    conda install glfw3  --solver=classic
+    
+    #if sudo
+    sudo apt-get install libgl1-mesa-glx libgl1-mesa-dri libglew2.1 libglfw3
 
     #Then add your conda environment include to CPATH (put this in your .bashrc to make it permanent):
     export CPATH=$CONDA_PREFIX/include
