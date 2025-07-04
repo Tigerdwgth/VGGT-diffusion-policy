@@ -3,6 +3,6 @@
     url = https://github.com/Tigerdwgth/VGGT-Encoder.git
 
 [submodule "3D-Diffusion-Policy/diffusion_policy_3d/model/vision/r3m"]
-    path = 3D-Diffusion-Policy/diffusion_policy_3d/model/vision/r3m
+    path = 3D-Diffusion-Policy/third_party/r3m
     url = https://github.com/facebookresearch/r3m.git
 
