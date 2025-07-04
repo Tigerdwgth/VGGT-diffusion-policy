@@ -50,9 +50,9 @@ For more detailed arguments, please refer to the scripts and the code. We here p
 
 1. Generate demonstrations by `gen_demonstration_adroit.sh` and `gen_demonstration_dexart.sh`. See the scripts for details. For example:
     ```bash
-    bash scripts/gen_demonstration_adroi
+    bash scripts/gen_demonstration_metaworld_all.sh
     ```
-    This will generate demonstrations for the `hammer` task in Adroit environment. The data will be saved in `VGGDP/data/` folder automatically.
+    This will generate demonstrations for the all the hard task in metaworld. The demonstrations will be saved under `$YOUR_REPO_PATH/VGGDP/data/`.
 
 
 2. Train and evaluate a policy with behavior cloning. For example:
