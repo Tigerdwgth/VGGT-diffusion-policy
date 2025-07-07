@@ -68,6 +68,12 @@ class MetaworldRunner(BaseRunner):
         all_traj_rewards = []
         all_success_rates = []
         env = self.env
+        
+        # 保存视频的相关变量
+        success_videos = []
+        failed_videos = []
+        has_success = False
+        has_failure = False
 
         
         for episode_idx in tqdm.tqdm(range(self.eval_episodes), desc=f"Eval in Metaworld {self.task_name} Pointcloud Env", leave=False, mininterval=self.tqdm_interval_sec):
@@ -106,6 +112,24 @@ class MetaworldRunner(BaseRunner):
             all_success_rates.append(is_success)
             all_traj_rewards.append(traj_reward)
             
+            # 获取当前episode的视频
+            episode_videos = env.env.get_video()
+            if len(episode_videos.shape) == 5:
+                episode_videos = episode_videos[:, 0]  # select first frame
+            
+            # 根据成功与否保存视频
+            if is_success:
+                if not has_success:  # 只保存第一个成功的视频
+                    success_videos = episode_videos
+                    has_success = True
+            else:
+                if not has_failure:  # 只保存第一个失败的视频
+                    failed_videos = episode_videos
+                    has_failure = True
+            
+            # 如果已经有成功和失败的视频，可以提前结束（可选）
+            # if has_success and has_failure:
+            #     break
 
         max_rewards = collections.defaultdict(list)
         log_data = dict()
@@ -122,14 +146,28 @@ class MetaworldRunner(BaseRunner):
         log_data['SR_test_L3'] = self.logger_util_test.average_of_largest_K()
         log_data['SR_test_L5'] = self.logger_util_test10.average_of_largest_K()
         
-
-        videos = env.env.get_video()
-        if len(videos.shape) == 5:
-            videos = videos[:, 0]  # select first frame
-        
-        if save_video:       
-            #save agent poseo
+        if save_video:
+            # 优先保存成功的视频，如果没有成功的则保存失败的视频
+            if has_success:
+                cprint(f"Saving successful episode video", 'green')
+                videos_wandb = wandb.Video(success_videos, fps=self.fps, format="mp4")
+                log_data[f'sim_video_eval_success'] = videos_wandb
+            elif has_failure:
+                cprint(f"Saving failed episode video", 'red')
+                videos_wandb = wandb.Video(failed_videos, fps=self.fps, format="mp4")
+                log_data[f'sim_video_eval_failure'] = videos_wandb
+            else:
+                cprint(f"No videos to save", 'yellow')
             
+            # 如果需要同时保存成功和失败的视频，可以取消注释下面的代码
+            # if has_success and has_failure:
+            #     videos_wandb_success = wandb.Video(success_videos, fps=self.fps, format="mp4")
+            #     videos_wandb_failure = wandb.Video(failed_videos, fps=self.fps, format="mp4")
+            #     log_data[f'sim_video_eval_success'] = videos_wandb_success
+            #     log_data[f'sim_video_eval_failure'] = videos_wandb_failure
+
+            # 以下是原有的保存逻辑（已注释）
+            # save agent poseo
             # disturbance = env.env.disturbance
             # agent_poses = env.env.agent_poses
             # os.makedirs(f"{self.output_dir}/videos", exist_ok=True)
@@ -137,7 +175,6 @@ class MetaworldRunner(BaseRunner):
             # with open(f"{self.output_dir}/videos/{self.task_name}_{disturbance}_agent_poses.pkl", 'wb') as f:
             #     dill.dump(agent_poses, f) 
           
-            
             # save_video_path = f"{self.output_dir}/videos/{self.task_name}_{disturbance}_invis_eval.mp4"
             # print(len(videos)," ", videos.shape)
             # print(f"Saving video to {save_video_path}")
@@ -175,14 +212,12 @@ class MetaworldRunner(BaseRunner):
             #     # 保存为 .ply 文件
             #     o3d.io.write_point_cloud(save_pc_path + f"/{i}.ply", point_cloud)
 
-            
             # print(f"Saving video to {save_video_path}")
             # env.env.save_video(save_video_path, videos, fps=self.fps, crf=self.crf)
             
-            videos_wandb = wandb.Video(videos, fps=self.fps, format="mp4")
-            log_data[f'sim_video_eval'] = videos_wandb
+            # videos_wandb = wandb.Video(videos, fps=self.fps, format="mp4")
+            # log_data[f'sim_video_eval'] = videos_wandb
 
         _ = env.reset()
-        videos = None
 
         return log_data
